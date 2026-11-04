@@ -815,18 +815,18 @@ static zend_string *date_format(const char *format, size_t format_len, timelib_t
 			case 'Z': length = slprintf(buffer, sizeof(buffer), "%d", localtime ? offset->offset : 0); break;
 
 			/* full date/time */
-			case 'c': length = slprintf(buffer, sizeof(buffer), "%04" ZEND_LONG_FMT_SPEC "-%02d-%02dT%02d:%02d:%02d%c%02d:%02d",
-							                (zend_long) t->y, (int) t->m, (int) t->d,
+			case 'c': length = slprintf(buffer, sizeof(buffer), "%s%04" PRIu64 "-%02d-%02dT%02d:%02d:%02d%c%02d:%02d",
+							                t->y < 0 ? "-" : "", php_date_llabs((timelib_sll) t->y), (int) t->m, (int) t->d,
 											(int) t->h, (int) t->i, (int) t->s,
 											localtime ? ((offset->offset < 0) ? '-' : '+') : '+',
 											localtime ? abs(offset->offset / 3600) : 0,
 											localtime ? abs((offset->offset % 3600) / 60) : 0
 							  );
 					  break;
-			case 'r': length = slprintf(buffer, sizeof(buffer), "%3s, %02d %3s %04" ZEND_LONG_FMT_SPEC " %02d:%02d:%02d %c%02d%02d",
+			case 'r': length = slprintf(buffer, sizeof(buffer), "%3s, %02d %3s %s%04" PRIu64 " %02d:%02d:%02d %c%02d%02d",
 							                php_date_short_day_name(t->y, t->m, t->d),
 											(int) t->d, mon_short_names[t->m - 1],
-											(zend_long) t->y, (int) t->h, (int) t->i, (int) t->s,
+											t->y < 0 ? "-" : "", php_date_llabs((timelib_sll) t->y), (int) t->h, (int) t->i, (int) t->s,
 											localtime ? ((offset->offset < 0) ? '-' : '+') : '+',
 											localtime ? abs(offset->offset / 3600) : 0,
 											localtime ? abs((offset->offset % 3600) / 60) : 0

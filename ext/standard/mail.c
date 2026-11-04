@@ -186,6 +186,9 @@ static void php_mail_build_headers_elems(smart_str *s, zend_string *key, zval *v
 			break;
 		}
 		php_mail_build_headers_elem(s, key, tmp_val);
+		if (EG(exception)) {
+			break;
+		}
 	} ZEND_HASH_FOREACH_END();
 }
 

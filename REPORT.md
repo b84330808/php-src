@@ -18,6 +18,7 @@
 | 4 | `fix/unpack-hex-star-position` | `413bd72d0fb3f994f0b948529c5672ab5c060a30` | `upstream/PHP-8.4` | ext/standard (pack) |
 | 5 | `fix/implode-frameless-array-null` | `3c89753b49828c4a3c17fba45beb60655a5f0785` | `upstream/PHP-8.4` | ext/standard (string, frameless call) |
 | 6 | `fix/date-format-c-r-negative-year` | `de1db78584b32a00f2aec4a82c1ffb1371b7a71a` | `upstream/PHP-8.4` | ext/date |
+| 7 | `fix/extract-prefix-if-exists-undef` | `26bb602662a99569fb642a25a2928f509dd89db7` | `upstream/PHP-8.4` | ext/standard (array, extract) |
 
 Fixes 1 and 6 both edit `date_format()` in `ext/date/php_date.c` a few lines
 apart (the `'c'`/`'r'` cases and the `'\\'` case), so whichever is merged
@@ -716,6 +717,118 @@ timelib parser limitation, left alone.
 
 Not a vulnerability. The output buffer is 97 bytes, and the longest output
 (`-` plus a 19-digit year) still fits, same as for `Y`.
+
+---
+
+## Fix 7: extract() EXTR_PREFIX_IF_EXISTS creates variables that don't exist
+
+- Branch: `fix/extract-prefix-if-exists-undef`
+- SHA: `26bb602662a99569fb642a25a2928f509dd89db7`
+- Author: `b84330808 <b84330808@gmail.com>`; no trailers
+- Files: `ext/standard/array.c` (+2/-9 in `php_extract_ref_prefix_if_exists()` and `php_extract_prefix_if_exists()`), `ext/standard/tests/array/extract_prefix_if_exists_undef.phpt` (new)
+- Found by: code review/testing (no existing issue)
+
+### PR title
+
+    Fix extract() EXTR_PREFIX_IF_EXISTS creating undefined variables
+
+### PR body draft
+
+    EXTR_PREFIX_IF_EXISTS is documented as "Only create prefixed variable
+    names if the non-prefixed version of the same variable exists in the
+    current symbol table." When the name is a compiled variable (CV) of the
+    calling scope that is still undefined, the prefix_if_exists helpers
+    instead assign the *unprefixed* variable and count it:
+
+        function f() {
+            $b = 'orig';
+            var_dump(extract(['a' => 1, 'b' => 2], EXTR_PREFIX_IF_EXISTS, 'p'));
+            var_dump(isset($a), $p_b);
+        }
+        f();
+        // int(2), bool(true), int(2)   expected: int(1), bool(false), int(2)
+
+    Any mention of `$a` in the function (here the `isset($a)` itself) makes it
+    a CV, so it is an IS_INDIRECT slot pointing to IS_UNDEF in the symbol
+    table. The IS_UNDEF branch looks copied from the EXTR_PREFIX_SAME helpers,
+    where assigning the unprefixed name is correct because there's no
+    collision. For PREFIX_IF_EXISTS it should skip the entry, like
+    php_extract_if_exists() / php_extract_ref_if_exists() already do for
+    EXTR_IF_EXISTS. Both the plain and the EXTR_REFS variant are fixed.
+
+    Targeting PHP-8.4 as the lowest branch receiving bug fixes. master has
+    the same code.
+
+    Note: open PR #22696 (EXTR_REFS use-after-free) edits a different hunk of
+    php_extract_ref_prefix_if_exists() (the prefixed-assignment path); the two
+    changes don't overlap.
+
+### Test commands
+
+    cd php-src            # checkout of fix/extract-prefix-if-exists-undef
+    ./buildconf --force && ./configure --disable-all --enable-debug --disable-cgi --disable-phpdbg && make -j4
+    TEST_PHP_EXECUTABLE=sapi/cli/php sapi/cli/php run-tests.php -q --show-diff ext/standard/tests/array/extract_prefix_if_exists_undef.phpt
+    TEST_PHP_EXECUTABLE=sapi/cli/php sapi/cli/php run-tests.php -q -j4 ext/standard/tests/array Zend/tests
+
+Fail-before (test added, `array.c` change reverted):
+
+    TEST 1/1 [ext/standard/tests/array/extract_prefix_if_exists_undef.phpt]
+    ========DIFF========
+    001- int(1)
+    001+ int(2)
+    002+ bool(true)
+         bool(false)
+    003- bool(false)
+         string(4) "orig"
+         int(2)
+    006- int(1)
+    007- bool(false)
+    006+ int(2)
+    007+ bool(true)
+         bool(false)
+         string(4) "orig"
+         int(2)
+    --
+    ========DONE========
+    FAIL extract() with EXTR_PREFIX_IF_EXISTS does not create variables that do not exist [ext/standard/tests/array/extract_prefix_if_exists_undef.phpt]
+
+Pass-after:
+
+    PASS extract() with EXTR_PREFIX_IF_EXISTS does not create variables that do not exist [ext/standard/tests/array/extract_prefix_if_exists_undef.phpt]
+
+`ext/standard/tests/array` + `Zend/tests` after the fix:
+
+    Number of tests :  5926              5761
+    Tests skipped   :   165 (  2.8%) --------
+    Tests failed    :     0 (  0.0%) (  0.0%)
+    Expected fail   :     1 (  0.0%) (  0.0%)
+    Tests passed    :  5760 ( 97.2%) (100.0%)
+
+### Same-pattern sweep
+
+All eight `php_extract_*` mode helpers (plain and `_ref`) were checked for
+their IS_INDIRECT→IS_UNDEF handling:
+- `if_exists`: `continue` (correct)
+- `overwrite`: assign (correct)
+- `prefix_same`: assign unprefixed (correct, no collision)
+- `prefix_all` / `prefix_invalid`: always prefix
+- `skip`: assign (correct, nothing to skip)
+- `prefix_if_exists`: was the only wrong one, in both variants
+
+### Competing PR / issue search (php/php-src, all states, issues and PRs)
+
+- `EXTR_PREFIX_IF_EXISTS`, `extract EXTR_PREFIX_IF_EXISTS`: only php/php-src#24730
+  (open; a separate EXTR_REFS memory-safety report, already public)
+- `is:pr 24730`, `extract EXTR_REFS`: php/php-src#22696 (open, that
+  use-after-free; different hunk, see note above), php/php-src#20481 (closed,
+  refactoring), php/php-src#18211 (closed)
+- `php_extract`: same results
+
+### Security assessment
+
+Not a vulnerability. The change only removes an assignment, so memory
+handling paths only get smaller. The public EXTR_REFS use-after-free work
+(php/php-src#24730 / php/php-src#22696) is separate and not touched.
 
 ---
 

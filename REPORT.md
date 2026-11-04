@@ -13,6 +13,7 @@
 | # | Branch (on fork) | Commit SHA | Base | Component |
 |---|------------------|------------|------|-----------|
 | 1 | `fix/date-format-trailing-backslash` | `6fb6db123c48e2fd194f211306573ce4f1a70774` | `upstream/PHP-8.4` | ext/date |
+| 2 | `fix/mail-array-header-first-error` | `ec816cdf8abcf27fcbd377934719558d5c578658` | `upstream/PHP-8.4` | ext/standard (mail) |
 
 ---
 
@@ -123,6 +124,114 @@ developer-controlled. Fine to fix in public.
 Not edited (no GH issue number; maintainers usually add NEWS on merge). If
 asked, a suggested entry under `- Date:` would be:
 `. Fixed date() emitting a NUL byte for a trailing backslash in the format. (<name>)`
+
+---
+
+## Fix 2: mail() array header validation continues after an error
+
+- Branch: `fix/mail-array-header-first-error`
+- SHA: `ec816cdf8abcf27fcbd377934719558d5c578658`
+- Author: `b84330808 <b84330808@gmail.com>`; no trailers
+- Files: `ext/standard/mail.c` (+3 lines), `ext/standard/tests/mail/mail_array_header_first_error.phpt` (new)
+- Found by: reading/testing code (no existing issue)
+
+### PR title
+
+    Fix mail() array header validation continuing after an error
+
+### PR body draft
+
+    php_mail_build_headers_elems() validates each value of an array-valued
+    additional header by calling php_mail_build_headers_elem(), but never
+    checks for an exception afterwards. Once one value is invalid, the rest
+    are still validated, and each further error throws another exception
+    chained on top of the first. The exception the caller sees then
+    describes the *last* invalid value, not the first:
+
+        mail('a@example.com', 's', 'm', ['X-Foo' => ["a\r\nb", 123]]);
+        // TypeError: Header "X-Foo" must only contain values of type string, int found
+        //   previous: ValueError: Header "X-Foo" contains CRLF characters ...
+
+        mail('a@example.com', 's', 'm', ['X-Foo:' => ['a', 'b']]);
+        // ValueError: Header name "X-Foo:" contains invalid characters
+        //   previous: ValueError: Header name "X-Foo:" contains invalid characters
+
+    This patch stops at the first error, as the top-level loop in
+    php_mail_build_headers() and the other two checks in the same loop
+    already do. mb_send_mail() uses the same helper and gets the same fix.
+
+    Targeting PHP-8.4 as the lowest branch receiving bug fixes. master has
+    the same code (only %pS formatting changes), so it merges up cleanly in
+    intent.
+
+### Test commands
+
+    cd php-src            # checkout of fix/mail-array-header-first-error
+    ./buildconf --force && ./configure --disable-all --enable-debug --disable-cgi --disable-phpdbg && make -j4
+    TEST_PHP_EXECUTABLE=sapi/cli/php sapi/cli/php run-tests.php -q --show-diff ext/standard/tests/mail/mail_array_header_first_error.phpt
+    TEST_PHP_EXECUTABLE=sapi/cli/php sapi/cli/php run-tests.php -q -j4 ext/standard/tests/mail
+
+Fail-before (test added, `mail.c` change reverted):
+
+    TEST 1/1 [ext/standard/tests/mail/mail_array_header_first_error.phpt]
+    ========DIFF========
+         ValueError: Header "X-Foo" contains CRLF characters that are used as a line separator and are not allowed in the header
+    002- previous: none
+    003- ValueError: Header "X-Foo" contains CRLF characters that are used as a line separator and are not allowed in the header
+    004- previous: none
+    002+ previous: ValueError: Header "X-Foo" contains CRLF characters that are used as a line separator and are not allowed in the header
+    003+ TypeError: Header "X-Foo" must only contain values of type string, int found
+    004+ previous: ValueError: Header "X-Foo" contains CRLF characters that are used as a line separator and are not allowed in the header
+         ValueError: Header name "X-Foo:" contains invalid characters
+    006- previous: none
+    006+ previous: ValueError: Header name "X-Foo:" contains invalid characters
+         ValueError: Header "X-Foo" contains NULL character that is not allowed in the header
+         previous: none
+    ========DONE========
+    FAIL mail(): an invalid value in an array header stops at the first error [ext/standard/tests/mail/mail_array_header_first_error.phpt]
+
+Pass-after:
+
+    TEST 1/1 [ext/standard/tests/mail/mail_array_header_first_error.phpt] PASS mail(): an invalid value in an array header stops at the first error
+
+Whole `ext/standard/tests/mail` directory after the fix:
+
+    Number of tests :    28                21
+    Tests skipped   :     7 ( 25.0%) --------    (Windows-only / needs SMTP)
+    Tests failed    :     0 (  0.0%) (  0.0%)
+    Tests passed    :    21 ( 75.0%) (100.0%)
+
+### Same-pattern sweep
+
+The other loops in `mail.c` already stop on error: the top-level loop in
+`php_mail_build_headers()` checks `EG(exception)` after every header, and the
+two in-loop checks in `php_mail_build_headers_elems()` `break`. The
+`IS_ARRAY` branch of `php_mail_build_headers_elem()` can't be reached from
+`_elems()` because non-string values are rejected first. The only external
+caller is `mb_send_mail()` (`ext/mbstring/mbstring.c`), and this fix covers it.
+
+### Competing PR / issue search (php/php-src, all states, issues and PRs)
+
+- `php_mail_build_headers`: 0 issues, 0 PRs
+- `mail additional_headers array exception`: 0 issues, 2 unrelated PRs (php/php-src#4851 stubs, php/php-src#1273 bug #68776)
+- `mail headers chained exception`: 0 / 0
+- `mail header array multiple exceptions`: only unrelated hits
+- `mail() header empty name` / `mail additional_headers empty header name`: only unrelated hits
+
+### Security assessment
+
+Not a vulnerability. Only the error reporting changes (which exception
+reaches the caller); no mail was sent before or after the fix, because the
+function fails either way.
+
+### Related, not fixed here
+
+An empty header name (`['' => 'x']`) passes the field-name check (the loop
+over zero characters succeeds) and then fails later with a misleading
+`Warning: mail(): Multiple or malformed newlines found in additional_header`
+and `false`, instead of the `ValueError: Header name "" contains invalid
+characters` that other bad names get. It's a separate change, possibly for
+master since it turns a warning into an exception. Not on any branch yet.
 
 ---
 

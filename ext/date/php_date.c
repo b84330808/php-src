@@ -834,7 +834,7 @@ static zend_string *date_format(const char *format, size_t format_len, timelib_t
 					  break;
 			case 'U': length = slprintf(buffer, sizeof(buffer), "%lld", (timelib_sll) t->sse); break;
 
-			case '\\': if (i < format_len) i++; ZEND_FALLTHROUGH;
+			case '\\': if (i + 1 < format_len) i++; ZEND_FALLTHROUGH;
 
 			default: buffer[0] = format[i]; buffer[1] = '\0'; length = 1; break;
 		}

@@ -14,6 +14,9 @@
 |---|------------------|------------|------|-----------|
 | 1 | `fix/date-format-trailing-backslash` | `6fb6db123c48e2fd194f211306573ce4f1a70774` | `upstream/PHP-8.4` | ext/date |
 | 2 | `fix/mail-array-header-first-error` | `ec816cdf8abcf27fcbd377934719558d5c578658` | `upstream/PHP-8.4` | ext/standard (mail) |
+| 3 | `fix/php-temp-maxmemory-error` | `3311cbf2bc09fa1b774ea4eaa7450f3a6e5fb900` | `upstream/PHP-8.4` | ext/standard (php:// wrapper) |
+
+Private finding, see local follow-up: ext/filter
 
 ---
 
@@ -232,6 +235,117 @@ over zero characters succeeds) and then fails later with a misleading
 and `false`, instead of the `ValueError: Header name "" contains invalid
 characters` that other bad names get. It's a separate change, possibly for
 master since it turns a warning into an exception. Not on any branch yet.
+
+Full `ext/standard` run on the fix-2 build: 3189 run, 3181 passed, 7 failed,
+1 warned. All 7 failures (`http/gh11274`, `http/gh16810`,
+`http/ghsa-c5f2-jwm7-mmq2`, `streams/bug46024`, `streams/bug64433`,
+`streams/gh10031`, `url/get_headers_error_003`) fail identically on a build
+without the mail.c change. They need outbound HTTP, a local CLI server or
+php-cgi, none of which the sandbox has.
+
+---
+
+## Fix 3: php://temp negative maxmemory error blames an unrelated argument
+
+- Branch: `fix/php-temp-maxmemory-error`
+- SHA: `3311cbf2bc09fa1b774ea4eaa7450f3a6e5fb900`
+- Author: `b84330808 <b84330808@gmail.com>`; no trailers
+- Files: `ext/standard/php_fopen_wrapper.c` (1 line), `ext/standard/tests/streams/temp_stream_negative_maxmemory.phpt` (new)
+- Found by: reading/testing code (no existing issue)
+
+### PR title
+
+    Fix php://temp negative maxmemory error blaming an unrelated argument
+
+### PR body draft
+
+    When php://temp/maxmemory:<n> has a negative value, the php:// stream
+    wrapper calls zend_argument_value_error(2, ...). The wrapper runs inside
+    whichever function opened the URL, so the error names that function's
+    second parameter, which has nothing to do with the URL:
+
+        fopen('php://temp/maxmemory:-1', 'w+');
+        // ValueError: fopen(): Argument #2 ($mode) must be greater than or equal to 0
+        file_get_contents('php://temp/maxmemory:-1');
+        // ValueError: file_get_contents(): Argument #2 ($use_include_path) must be ...
+        file_put_contents('php://temp/maxmemory:-1', 'x');
+        // ValueError: file_put_contents(): Argument #2 ($data) must be ...
+        file('php://temp/maxmemory:-1');
+        // ValueError: file(): Argument #2 ($flags) must be ...
+        include 'php://temp/maxmemory:-1';
+        // ValueError: {main}(): Argument #2 must be ...
+
+    PHP 7.4 threw Error("Max memory must be >= 0") here. The PHP 8.0 conversion
+    to the argument-error API picked argument 2, which is only right for
+    callers that happen to have the URL as their second parameter.
+
+    This keeps the ValueError but uses a message that describes the actual
+    problem: "Max memory of php://temp must be greater than or equal to 0".
+    No existing test covered this path.
+
+    Targeting PHP-8.4 as the lowest branch receiving bug fixes. PHP-8.5,
+    PHP-8.6 and master have the same line.
+
+### Test commands
+
+    cd php-src            # checkout of fix/php-temp-maxmemory-error
+    ./buildconf --force && ./configure --disable-all --enable-debug --disable-cgi --disable-phpdbg && make -j4
+    TEST_PHP_EXECUTABLE=sapi/cli/php sapi/cli/php run-tests.php -q --show-diff ext/standard/tests/streams/temp_stream_negative_maxmemory.phpt
+    TEST_PHP_EXECUTABLE=sapi/cli/php sapi/cli/php run-tests.php -q -j4 ext/standard/tests/streams ext/standard/tests/file ext/spl/tests
+
+Fail-before (test added, `php_fopen_wrapper.c` change reverted):
+
+    TEST 1/1 [ext/standard/tests/streams/temp_stream_negative_maxmemory.phpt]
+    ========DIFF========
+    001- fopen: Max memory of php://temp must be greater than or equal to 0
+    002- file_get_contents: Max memory of php://temp must be greater than or equal to 0
+    003- file_put_contents: Max memory of php://temp must be greater than or equal to 0
+    004- file: Max memory of php://temp must be greater than or equal to 0
+    005- SplFileObject: Max memory of php://temp must be greater than or equal to 0
+    001+ fopen: fopen(): Argument #2 ($mode) must be greater than or equal to 0
+    002+ file_get_contents: file_get_contents(): Argument #2 ($use_include_path) must be greater than or equal to 0
+    003+ file_put_contents: file_put_contents(): Argument #2 ($data) must be greater than or equal to 0
+    004+ file: file(): Argument #2 ($flags) must be greater than or equal to 0
+    005+ SplFileObject: SplFileObject::__construct(): Argument #2 ($mode) must be greater than or equal to 0
+         bool(true)
+    ========DONE========
+    FAIL php://temp with a negative maxmemory does not blame an unrelated argument [ext/standard/tests/streams/temp_stream_negative_maxmemory.phpt]
+
+Pass-after:
+
+    TEST 1/1 [ext/standard/tests/streams/temp_stream_negative_maxmemory.phpt] PASS php://temp with a negative maxmemory does not blame an unrelated argument
+
+`ext/standard/tests/streams` + `ext/standard/tests/file` + `ext/spl/tests` after the fix:
+
+    Number of tests :  1847              1496
+    Tests skipped   :   351 ( 19.0%) --------
+    Tests failed    :     3 (  0.2%) (  0.2%)    (streams/bug46024, streams/bug64433, streams/gh10031)
+    Expected fail   :     1 (  0.1%) (  0.1%)
+    Tests passed    :  1492 ( 80.8%) ( 99.7%)
+
+Those 3 failures are environmental: they also fail on the unpatched build
+(see the fix-2 note).
+
+### Same-pattern sweep
+
+Grepped `main/streams/*.c`, `main/*.c`, `ext/standard/{php,ftp,http}_fopen_wrapper.c`,
+`ext/standard/filters.c`, `ext/standard/user_filters.c`, `ext/zlib`, `ext/bz2`
+and `ext/standard/streamsfuncs.c` for `zend_argument_*_error()` calls made
+from wrapper or filter callbacks, where the "active function" is whatever
+opened the stream. `php_fopen_wrapper.c:200` is the only one. Every other
+hit is inside a real `PHP_FUNCTION`, where the argument number is correct.
+
+### Competing PR / issue search (php/php-src, all states, issues and PRs)
+
+- `php://temp maxmemory`: 2 unrelated issues (php/php-src#20530 debug prefix idea, php/php-src#23905 seek position), 1 unrelated PR (php/php-src#23907 seek position)
+- `maxmemory negative`: same unrelated php/php-src#20530 / php/php-src#23907
+- `php://temp/maxmemory error message`: 0 / 0
+- `php_fopen_wrapper argument`: 0 / 0
+
+### Security assessment
+
+Not a vulnerability: only an error message changes. The negative value is
+still rejected with a ValueError, as before.
 
 ---
 

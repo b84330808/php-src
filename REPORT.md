@@ -16,6 +16,7 @@
 | 2 | `fix/mail-array-header-first-error` | `ec816cdf8abcf27fcbd377934719558d5c578658` | `upstream/PHP-8.4` | ext/standard (mail) |
 | 3 | `fix/php-temp-maxmemory-error` | `3311cbf2bc09fa1b774ea4eaa7450f3a6e5fb900` | `upstream/PHP-8.4` | ext/standard (php:// wrapper) |
 | 4 | `fix/unpack-hex-star-position` | `413bd72d0fb3f994f0b948529c5672ab5c060a30` | `upstream/PHP-8.4` | ext/standard (pack) |
+| 5 | `fix/implode-frameless-array-null` | `3c89753b49828c4a3c17fba45beb60655a5f0785` | `upstream/PHP-8.4` | ext/standard (string, frameless call) |
 
 Private finding, see local follow-up: ext/filter
 
@@ -473,6 +474,123 @@ assigns `size = len` inside its case. Fixed-width codes have constant sizes.
 Not a vulnerability. Before the fix the position only moved backwards and
 was clamped to 0, so it never read outside the input. After the fix it
 moves to exactly `inputlen`.
+
+---
+
+## Fix 5: implode($array, null) throws on the frameless call path
+
+- Branch: `fix/implode-frameless-array-null`
+- SHA: `3c89753b49828c4a3c17fba45beb60655a5f0785`
+- Author: `b84330808 <b84330808@gmail.com>`; no trailers
+- Files: `ext/standard/string.c` (+11 lines in `ZEND_FRAMELESS_FUNCTION(implode, 2)`), `ext/standard/tests/strings/implode_array_null_frameless.phpt` (new)
+- Found by: code review/testing (no existing issue). This is PHP 8.4-only:
+  frameless calls were added in 8.4.
+
+### PR title
+
+    Fix implode($array, null) throwing on the frameless call path
+
+### PR body draft
+
+    PHP_FUNCTION(implode) accepts an array as the first argument when the
+    second argument is null; it's the same as implode($array), and the stub
+    allows it (string|array $separator, ?array $array = null). The frameless
+    variant that direct two-argument calls compile to parses argument 1 as a
+    string unconditionally. So whether the call works depends on how it is
+    made:
+
+        $a = ['a', 'b'];
+        implode($a, null);                    // TypeError: Argument #1 ($separator) must be of type string, array given
+        call_user_func('implode', $a, null);  // "ab"
+        join($a, null);                       // "ab" (the alias isn't frameless)
+
+    For implode($array, 'x') it also blames argument 1, while the regular
+    function says "Argument #2 ($array) must be of type ?array, string given".
+
+    The fix handles an array first argument the way the regular function
+    does. I ran a differential test that calls every frameless function in
+    ext/standard, Zend and ext/pcre directly and via call_user_func() over
+    10 argument kinds (8360 combinations). After this patch the only
+    remaining implode difference is that implode(null) on the 1-arg frameless
+    path doesn't emit the "Passing null to parameter #1" deprecation before
+    the same TypeError. The in_array() differences only appear with all-literal
+    arguments, which are evaluated at compile time.
+
+    Targeting PHP-8.4 (frameless functions were introduced in 8.4). master
+    has the same code.
+
+### Test commands
+
+    cd php-src            # checkout of fix/implode-frameless-array-null
+    ./buildconf --force && ./configure --disable-all --enable-debug --disable-cgi --disable-phpdbg && make -j4
+    TEST_PHP_EXECUTABLE=sapi/cli/php sapi/cli/php run-tests.php -q --show-diff ext/standard/tests/strings/implode_array_null_frameless.phpt
+    TEST_PHP_EXECUTABLE=sapi/cli/php sapi/cli/php run-tests.php -q -j4 ext/standard/tests/strings Zend/tests/frameless* ext/opcache/tests
+
+Fail-before (test added, `string.c` change reverted):
+
+    TEST 1/1 [ext/standard/tests/strings/implode_array_null_frameless.phpt]
+    ========DIFF========
+    001- array, null (direct): 'ab'
+    001+ array, null (direct): implode(): Argument #1 ($separator) must be of type string, array given
+         array, null (dynamic): 'ab'
+    003- array, null literal (direct): 'ab'
+    003+ array, null literal (direct): implode(): Argument #1 ($separator) must be of type string, array given
+         array, null literal (dynamic): 'ab'
+    005- empty array, null (direct): ''
+    005+ empty array, null (direct): implode(): Argument #1 ($separator) must be of type string, array given
+         empty array, null (dynamic): ''
+    007- array, string (direct): implode(): Argument #2 ($array) must be of type ?array, string given
+    007+ array, string (direct): implode(): Argument #1 ($separator) must be of type string, array given
+         array, string (dynamic): implode(): Argument #2 ($array) must be of type ?array, string given
+         array, array (direct): implode(): Argument #1 ($separator) must be of type string, array given
+         array, array (dynamic): implode(): Argument #1 ($separator) must be of type string, array given
+    --
+    ========DONE========
+    FAIL implode() with an array first argument behaves the same in direct and dynamic calls [ext/standard/tests/strings/implode_array_null_frameless.phpt]
+
+Pass-after:
+
+    TEST 1/1 [ext/standard/tests/strings/implode_array_null_frameless.phpt] PASS implode() with an array first argument behaves the same in direct and dynamic calls
+
+`ext/standard/tests/strings` + `Zend/tests/frameless*` + `ext/opcache/tests` after the fix:
+
+    Number of tests :  1707               988
+    Tests skipped   :   719 ( 42.1%) --------   (opcache not built in this --disable-all config)
+    Tests failed    :     0 (  0.0%) (  0.0%)
+    Tests passed    :   988 ( 57.9%) (100.0%)
+
+Worth re-running with opcache/JIT enabled before opening the PR. The JIT
+calls the same frameless handler, but this sandbox build didn't include
+opcache.
+
+### Same-pattern sweep
+
+Differential test (direct frameless call vs `call_user_func`) over every
+frameless function in 8.4: `implode/1,2`, `in_array/2,3`, `is_numeric`,
+`dechex`, `dirname/1,2`, `str_contains`, `str_starts_with`, `strpos/2,3`,
+`strstr/2,3`, `strtr/2,3`, `substr/2,3`, `trim/1,2`, `str_replace`,
+`class_exists/1,2`, `property_exists`, `preg_match/2`, `preg_replace/3`.
+Argument values were null, strings, arrays, int, float and bool. Only
+`implode/2` differed in behavior. (A reviewer separately noted a `min()`
+int/float tie-break difference on the frameless path, already covered by
+php/php-src#23505 / issue #20221, so not touched.)
+
+### Competing PR / issue search (php/php-src, all states, issues and PRs)
+
+- `implode frameless`: php/php-src#21639 (open, volatile frameless args during
+  `__toString` reentry; different), php/php-src#23204 (closed, UAF; different),
+  PRs php/php-src#21815, php/php-src#23436, php/php-src#12461 (none touch the
+  array-first case)
+- `implode null TypeError` / `implode array null`: php/php-src#12682 / PR
+  php/php-src#12683 (2023, error message for `implode('x', null)`; pre-frameless,
+  different case), php/php-src#9667, php/php-src#10197 (named args), php/php-src#23207;
+  none cover this
+- `frameless implode`, `implode($array, null)`: nothing new
+
+### Security assessment
+
+Not a vulnerability: type-handling consistency only, no memory handling
+changes (no new allocations, and the early-return path frees nothing).
 
 ---
 

@@ -17,6 +17,12 @@
 | 3 | `fix/php-temp-maxmemory-error` | `3311cbf2bc09fa1b774ea4eaa7450f3a6e5fb900` | `upstream/PHP-8.4` | ext/standard (php:// wrapper) |
 | 4 | `fix/unpack-hex-star-position` | `413bd72d0fb3f994f0b948529c5672ab5c060a30` | `upstream/PHP-8.4` | ext/standard (pack) |
 | 5 | `fix/implode-frameless-array-null` | `3c89753b49828c4a3c17fba45beb60655a5f0785` | `upstream/PHP-8.4` | ext/standard (string, frameless call) |
+| 6 | `fix/date-format-c-r-negative-year` | `de1db78584b32a00f2aec4a82c1ffb1371b7a71a` | `upstream/PHP-8.4` | ext/date |
+
+Fixes 1 and 6 both edit `date_format()` in `ext/date/php_date.c` a few lines
+apart (the `'c'`/`'r'` cases and the `'\\'` case), so whichever is merged
+second may need a trivial rebase. They're otherwise independent and can be
+sent as separate PRs.
 
 Private finding, see local follow-up: ext/filter
 
@@ -591,6 +597,125 @@ php/php-src#23505 / issue #20221, so not touched.)
 
 Not a vulnerability: type-handling consistency only, no memory handling
 changes (no new allocations, and the early-return path frees nothing).
+
+---
+
+## Fix 6: date() "c" and "r" pad negative years to only three digits
+
+- Branch: `fix/date-format-c-r-negative-year`
+- SHA: `de1db78584b32a00f2aec4a82c1ffb1371b7a71a`
+- Author: `b84330808 <b84330808@gmail.com>`; no trailers
+- Files: `ext/date/php_date.c` (the `'c'` and `'r'` cases of `date_format()`), `ext/date/tests/date_format_c_r_negative_year.phpt` (new)
+- Found by: code review/testing (no existing GitHub issue; it's the leftover
+  part of old bugs.php.net #41844, which fixed only `Y`)
+
+### PR title
+
+    Fix date() "c" and "r" padding negative years to only three digits
+
+### PR body draft
+
+    The "c" and "r" format characters print the year with "%04" and a signed
+    value, so the minus sign uses up one of the four positions. Years -1 to
+    -999 come out with three digits, unlike "Y", DATE_ATOM and DATE_RFC2822:
+
+        $d = new DateTimeImmutable('-0044-03-15 12:00:00', new DateTimeZone('UTC'));
+        $d->format('c');          // -044-03-15T12:00:00+00:00
+        $d->format(DATE_ATOM);    // -0044-03-15T12:00:00+00:00
+        $d->format('r');          // Thu, 15 Mar -044 12:00:00 +0000
+        $d->format(DATE_RFC2822); // Thu, 15 Mar -0044 12:00:00 +0000
+
+    The 3-digit "c" output also doesn't parse back:
+    new DateTimeImmutable('-044-03-15T12:00:00+00:00') throws "Double
+    timezone specification". The 4-digit form parses fine.
+
+    Bug #41844 ("Format returns incorrect number of digits for negative years
+    -0001 to -0999") fixed this for "Y" by printing the sign separately from
+    the zero-padded absolute value. This applies the same to "c" and "r".
+    Positive years and years with 5+ digits are unchanged. No existing test
+    expected the 3-digit form; ext/date passes.
+
+    Targeting PHP-8.4 as the lowest branch receiving bug fixes. master has
+    the same code.
+
+### Test commands
+
+    cd php-src            # checkout of fix/date-format-c-r-negative-year
+    ./buildconf --force && ./configure --disable-all --enable-debug --disable-cgi --disable-phpdbg && make -j4
+    TEST_PHP_EXECUTABLE=sapi/cli/php sapi/cli/php run-tests.php -q --show-diff ext/date/tests/date_format_c_r_negative_year.phpt
+    TEST_PHP_EXECUTABLE=sapi/cli/php sapi/cli/php run-tests.php -q -j4 ext/date
+
+Fail-before (test added, `php_date.c` change reverted):
+
+    TEST 1/1 [ext/date/tests/date_format_c_r_negative_year.phpt]
+    ========DIFF========
+    001- -0044-03-15T12:00:00+00:00
+    002- Thu, 15 Mar -0044 12:00:00 +0000
+    003- bool(true)
+    004- bool(true)
+    005- -0999-06-28T00:00:00+00:00
+    006- Sun, 28 Jun -0999 00:00:00 +0000
+    007- bool(true)
+    008- bool(true)
+    009- -0001-01-01T00:00:00+00:00
+    010- Fri, 01 Jan -0001 00:00:00 +0000
+    011- bool(true)
+    012- bool(true)
+    001+ -044-03-15T12:00:00+00:00
+    002+ Thu, 15 Mar -044 12:00:00 +0000
+    003+ bool(false)
+    004+ bool(false)
+    005+ -999-06-28T00:00:00+00:00
+    006+ Sun, 28 Jun -999 00:00:00 +0000
+    007+ bool(false)
+    008+ bool(false)
+    009+ -001-01-01T00:00:00+00:00
+    010+ Fri, 01 Jan -001 00:00:00 +0000
+    011+ bool(false)
+    012+ bool(false)
+         -12345-01-01T00:00:00+00:00
+         Fri, 01 Jan -12345 00:00:00 +0000
+         bool(true)
+    --
+         Sat, 01 Jan 0005 00:00:00 +0000
+         bool(true)
+         bool(true)
+    021- bool(true)
+    021+ Failed to parse time string (-044-03-15T12:00:00+00:00) at position 7 (-): Double timezone specification
+    ========DONE========
+    FAIL date() "c" and "r" formats pad negative years to four digits like "Y" [ext/date/tests/date_format_c_r_negative_year.phpt]
+
+Pass-after:
+
+    PASS date() "c" and "r" formats pad negative years to four digits like "Y" [ext/date/tests/date_format_c_r_negative_year.phpt]
+    PASS Bug #41844 (Format returns incorrect number of digits for negative years -0001 to -0999) [ext/date/tests/bug41844.phpt]
+    PASS Handling of large year values [ext/date/tests/big_year.phpt]
+
+Whole ext/date suite after the fix:
+
+    Number of tests :   705               693
+    Tests skipped   :    12 (  1.7%) --------
+    Tests failed    :     0 (  0.0%) (  0.0%)
+    Tests passed    :   693 ( 98.3%) (100.0%)
+
+### Same-pattern sweep
+
+In `date_format()`, every year output was checked. `Y`, `x` and `X` already
+use the sign-plus-`%04`-of-abs pattern. `o` (ISO year) and `y` aren't
+zero-padded to 4 by definition. `c` and `r` were the only `%04` signed
+prints. `DateInterval::format()` has no 4-digit year fields.
+`createFromFormat('Y', '-0044')` not accepting a minus sign is a separate
+timelib parser limitation, left alone.
+
+### Competing PR / issue search (php/php-src, all states, issues and PRs)
+
+- `date format c negative year`: php/php-src#13273 (closed, `idate()` for year -1; different), plus two unrelated DateInterval issues
+- `negative year ISO 8601 format`, `format("c") negative year`, `date r negative year`, `negative year padding`, `DATE_ATOM negative year`: no relevant hits
+
+### Security assessment
+
+Not a vulnerability. The output buffer is 97 bytes, and the longest output
+(`-` plus a 19-digit year) still fits, same as for `Y`.
 
 ---
 

@@ -2077,13 +2077,7 @@ static zend_long php_extract_ref_prefix_if_exists(zend_array *arr, zend_array *s
 			if (Z_TYPE_P(orig_var) == IS_INDIRECT) {
 				orig_var = Z_INDIRECT_P(orig_var);
 				if (Z_TYPE_P(orig_var) == IS_UNDEF) {
-					if (Z_ISREF_P(entry)) {
-						Z_ADDREF_P(entry);
-					} else {
-						ZVAL_MAKE_REF_EX(entry, 2);
-					}
-					ZVAL_REF(orig_var, Z_REF_P(entry));
-					count++;
+					/* An undefined compiled variable does not exist */
 					continue;
 				}
 			}
@@ -2136,8 +2130,7 @@ static zend_long php_extract_prefix_if_exists(zend_array *arr, zend_array *symbo
 			if (Z_TYPE_P(orig_var) == IS_INDIRECT) {
 				orig_var = Z_INDIRECT_P(orig_var);
 				if (Z_TYPE_P(orig_var) == IS_UNDEF) {
-					ZVAL_COPY_DEREF(orig_var, entry);
-					count++;
+					/* An undefined compiled variable does not exist */
 					continue;
 				}
 			}

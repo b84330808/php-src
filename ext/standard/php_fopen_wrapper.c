@@ -197,7 +197,7 @@ static php_stream * php_stream_url_wrap_php(php_stream_wrapper *wrapper, const c
 			path += 11;
 			max_memory = ZEND_STRTOL(path, NULL, 10);
 			if (max_memory < 0) {
-				zend_argument_value_error(2, "must be greater than or equal to 0");
+				zend_value_error("Max memory of php://temp must be greater than or equal to 0");
 				return NULL;
 			}
 		}

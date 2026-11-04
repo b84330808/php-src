@@ -15,8 +15,11 @@
 | 1 | `fix/date-format-trailing-backslash` | `6fb6db123c48e2fd194f211306573ce4f1a70774` | `upstream/PHP-8.4` | ext/date |
 | 2 | `fix/mail-array-header-first-error` | `ec816cdf8abcf27fcbd377934719558d5c578658` | `upstream/PHP-8.4` | ext/standard (mail) |
 | 3 | `fix/php-temp-maxmemory-error` | `3311cbf2bc09fa1b774ea4eaa7450f3a6e5fb900` | `upstream/PHP-8.4` | ext/standard (php:// wrapper) |
+| 4 | `fix/unpack-hex-star-position` | `413bd72d0fb3f994f0b948529c5672ab5c060a30` | `upstream/PHP-8.4` | ext/standard (pack) |
 
 Private finding, see local follow-up: ext/filter
+
+Private finding (unverified leads, 2), see local follow-up: ext/standard
 
 ---
 
@@ -346,6 +349,130 @@ hit is inside a real `PHP_FUNCTION`, where the argument number is correct.
 
 Not a vulnerability: only an error message changes. The negative value is
 still rejected with a ValueError, as before.
+
+---
+
+## Fix 4: unpack() "h*" / "H*" does not advance the input position
+
+- Branch: `fix/unpack-hex-star-position`
+- SHA: `413bd72d0fb3f994f0b948529c5672ab5c060a30`
+- Author: `b84330808 <b84330808@gmail.com>`; no trailers
+- Files: `ext/standard/pack.c` (+3 lines), `ext/standard/tests/strings/unpack_hex_star_position.phpt` (new)
+- Found by: code review/testing (no existing issue)
+
+### PR title
+
+    Fix unpack() "h*" and "H*" not advancing the input position
+
+### PR body draft
+
+    For the '*' repeater, the h/H case in unpack() leaves `size` at -1. The
+    a/A/Z cases set `size` to the number of bytes they consumed; the hex case
+    never does, so the common `inputpos += size` moves the position one byte
+    *backwards* instead of to the end of the input. Any format code after
+    h* / H* therefore re-reads data that was already consumed:
+
+        unpack("H*a/H*b", "\xab\xcd");
+        // ["a" => "abcd", "b" => "abcd"]   expected "b" => ""  (like "a*a/a*b")
+
+        unpack("H*a/Cb", "\xab\xcd");
+        // ["a" => "abcd", "b" => 171]       expected the usual
+        // "Type C: not enough input values" warning and false (like "a*a/Cb")
+
+        unpack("Ca/H*b/X/Cc", "\x01\xab\xcd");
+        // "c" => 1 (re-reads byte 0)        expected 205 (last byte)
+
+    The fix sets `size` to the number of input bytes the nibbles came from,
+    `(len + 1) / 2`. That equals the value already computed for explicit
+    counts, so only the '*' case changes. I checked H/h with counts 0 to 7 on
+    a 4-byte input followed by `C`; results are unchanged.
+
+    Targeting PHP-8.4 as the lowest branch receiving bug fixes. master has
+    the same code.
+
+### Test commands
+
+    cd php-src            # checkout of fix/unpack-hex-star-position
+    ./buildconf --force && ./configure --disable-all --enable-debug --disable-cgi --disable-phpdbg && make -j4
+    TEST_PHP_EXECUTABLE=sapi/cli/php sapi/cli/php run-tests.php -q --show-diff ext/standard/tests/strings/unpack_hex_star_position.phpt
+    TEST_PHP_EXECUTABLE=sapi/cli/php sapi/cli/php run-tests.php -q -j4 ext/standard/tests/strings
+
+Fail-before (test added, `pack.c` change reverted):
+
+    TEST 1/1 [ext/standard/tests/strings/unpack_hex_star_position.phpt]
+    ========DIFF========
+    --
+           ["b"]=>
+           string(4) "abcd"
+           ["c"]=>
+    007-   int(205)
+    007+   int(1)
+         }
+         array(3) {
+           ["a"]=>
+    --
+           ["b"]=>
+           string(4) "badc"
+           ["c"]=>
+    015-   int(205)
+    015+   int(1)
+         }
+         array(2) {
+           ["a"]=>
+           string(4) "abcd"
+           ["b"]=>
+    021-   string(0) ""
+    021+   string(4) "abcd"
+         }
+    023-
+    024- Warning: unpack(): Type C: not enough input values, need 1 values but only 0 were provided in %s on line %d
+    025- bool(false)
+    023+ array(2) {
+    024+   ["a"]=>
+    025+   string(4) "abcd"
+    026+   ["b"]=>
+    027+   int(171)
+    028+ }
+         array(2) {
+           ["a"]=>
+           string(3) "abc"
+    --
+    ========DONE========
+    FAIL unpack() with "h*" and "H*" advances the position to the end of the input [ext/standard/tests/strings/unpack_hex_star_position.phpt]
+
+Pass-after:
+
+    TEST 1/1 [ext/standard/tests/strings/unpack_hex_star_position.phpt] PASS unpack() with "h*" and "H*" advances the position to the end of the input
+
+Whole `ext/standard/tests/strings` directory (includes all pack/unpack tests) after the fix:
+
+    Number of tests :   749               679
+    Tests skipped   :    70 (  9.3%) --------
+    Tests failed    :     0 (  0.0%) (  0.0%)
+    Tests passed    :   679 ( 90.7%) (100.0%)
+
+### Same-pattern sweep
+
+In `unpack()`, every other code with variable consumption (`a`, `A`, `Z`)
+assigns `size = len` inside its case. Fixed-width codes have constant sizes.
+`X`/`@` use `size` deliberately (-1/0) and handle the position themselves.
+`h`/`H` was the only variable-length case that didn't update `size`.
+
+### Competing PR / issue search (php/php-src, all states, issues and PRs)
+
+- `unpack hex`: 0 relevant issues; 1 PR, php/php-src#15615 (GH-15613, repeater
+  overflow check, closed), which is a different problem
+- `unpack hex string star`, `unpack hex position`, `unpack "H*" next format`,
+  `unpack H format following`, `unpack hexadecimal`: no relevant hits
+- `unpack H*`: only unrelated hits (spread/array-unpacking issues)
+- bugs.php.net could not be searched from the sandbox (php.net blocked by
+  the proxy); worth a quick look before opening the PR.
+
+### Security assessment
+
+Not a vulnerability. Before the fix the position only moved backwards and
+was clamped to 0, so it never read outside the input. After the fix it
+moves to exactly `inputlen`.
 
 ---
 

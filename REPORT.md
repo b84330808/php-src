@@ -7,6 +7,16 @@
   (`./configure --disable-all --enable-debug --disable-cgi --disable-phpdbg
   --enable-ctype --enable-tokenizer --enable-filter --enable-calendar`)
 - Nothing was posted to upstream (no PRs, comments, issues, reactions or pushes).
+- Each fix branch is exactly one commit on top of `upstream/PHP-8.4`
+  (`7f8c655ecca`), authored `b84330808 <b84330808@gmail.com>`, with no
+  trailers (no DCO or AI trailer is required by the repo).
+
+Before opening any PR: (1) repeat the duplicate search, because AGENTS.md
+asks for a check "again before opening a pull request"; (2) confirm on
+php.net/supported-versions that 8.4 is still the lowest bug-fix branch;
+(3) either rewrite the PR bodies in your own words or put LLM-written
+paragraphs in a `>` quote, per CONTRIBUTING's LLM note; (4) ideally re-run
+the tests with opcache/JIT and ZTS, which this sandbox build didn't include.
 
 ## Fix branches
 
@@ -829,6 +839,62 @@ their IS_INDIRECT→IS_UNDEF handling:
 Not a vulnerability. The change only removes an assignment, so memory
 handling paths only get smaller. The public EXTR_REFS use-after-free work
 (php/php-src#24730 / php/php-src#22696) is separate and not touched.
+
+---
+
+## Further candidates (not fixed, no branch)
+
+Found during the same review and reproduced against the 8.4 debug build by
+review sub-agents. I did **not** re-verify these myself or search for
+competing PRs, except where noted. Treat them as leads, not findings.
+Security-adjacent leads are deliberately left out and are covered by the
+"private finding" lines at the top.
+
+- **sprintf `%x`/`%X`/`%o`/`%b` with a precision print nothing**:
+  `sprintf("%.2x", 255) === ""`, while `%d` ignores the precision.
+  `php_sprintf_append2n()` passes `max_width = 0` together with `expprec`.
+  Caveat: the auto-generated `vprintf_variation11..14{,_64bit}.phpt` tests
+  currently expect the blank output.
+- **sprintf undercounts required args when a `*` width/precision arg is missing**:
+  `sprintf("%*d")` says "2 arguments are required, 1 given" (should be 3).
+  The `continue` in `php_formatted_print()` skips counting the rest of the
+  specifier.
+- **sscanf/fscanf: a format ending in `%` gives a truncated error message**
+  (`Bad scan conversion character "` with the closing quote missing, because
+  the `%c` is the NUL terminator). In `scanf.c`, `ValidateFormat()`.
+- **quoted_printable_encode() splits UTF-8 sequences at soft line breaks**:
+  continuation bytes are treated as 2-byte lead bytes. Overlaps open PR
+  php/php-src#24442.
+- **`convert.quoted-printable-decode` stream filter rejects `=` + spaces + CRLF
+  soft breaks when `line-break-chars` isn't given** (auto-detect missing in
+  scan state 4 of `php_conv_qprint_decode_convert()`).
+  `quoted_printable_decode()` handles the same input.
+- **`convert.quoted-printable-encode` look-ahead is off by one**
+  (`ps2 = ps` should be `ps + 1`), so with `line-length`, `"a b"` encodes as
+  `"a=20b"`.
+- **DateTime::setDate()/setISODate() into a DST gap leave an impossible
+  wall time** (02:30 EDT): they call `timelib_update_ts()` but not
+  `timelib_update_from_sse()`, unlike `setTime()` (bug #79396 fix).
+- **date_sunrise()/date_sunset() default UTC offset** is computed before
+  `timelib_unixtime2local()`, so it uses the 1970 offset instead of the
+  offset at `$timestamp`. Off by 1h in summer; these functions are deprecated.
+- **DateTimeZone::getTransitions() end boundary**: stored transitions use
+  `< timestamp_end`, POSIX-rule ones use `> timestamp_end → return` (inclusive).
+  Near GH-18051 / PR php/php-src#18054, so coordinate with that.
+- **DateInterval loses its wall-clock flag (`civil_or_wall`)** on
+  serialize/unserialize, var_export and `DatePeriod::getDateInterval()`.
+  Not a small fix, since the serialization format changes.
+- **range() "exceeds the maximum array size" message prints start/end
+  swapped for decreasing ranges.** Overlaps the open GH-22505 PRs
+  (php/php-src#22507, php/php-src#23702), so skip unless they stall.
+- **debug_zval_dump() truncates object property names at a NUL byte**, unlike
+  var_dump(); **var_export() doesn't escape NUL in object property names**,
+  unlike array keys. May clash with the master-only `%pS` migration.
+- **mail() with an empty header name** gives a misleading "Multiple or
+  malformed newlines" warning instead of the usual ValueError (see fix 2
+  notes).
+- **Frameless `implode(null)`** skips the "Passing null to parameter #1"
+  deprecation before the TypeError (see fix 5 notes).
 
 ---
 

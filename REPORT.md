@@ -35,9 +35,7 @@ apart (the `'c'`/`'r'` cases and the `'\\'` case), so whichever is merged
 second may need a trivial rebase. They're otherwise independent and can be
 sent as separate PRs.
 
-Private finding, see local follow-up: ext/filter
 
-Private finding (unverified leads, 2), see local follow-up: ext/standard
 
 ---
 
@@ -848,7 +846,6 @@ Found during the same review and reproduced against the 8.4 debug build by
 review sub-agents. I did **not** re-verify these myself or search for
 competing PRs, except where noted. Treat them as leads, not findings.
 Security-adjacent leads are deliberately left out and are covered by the
-"private finding" lines at the top.
 
 - **sprintf `%x`/`%X`/`%o`/`%b` with a precision print nothing**:
   `sprintf("%.2x", 255) === ""`, while `%d` ignores the precision.
